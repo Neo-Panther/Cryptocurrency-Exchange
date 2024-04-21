@@ -1,6 +1,7 @@
+import time
 from typing import Any, TypedDict
 from collections.abc import Iterable
-import datetime
+from datetime import datetime
 import json
 import hashlib
 import rsa
@@ -22,7 +23,7 @@ class customEncoder(json.JSONEncoder):
     elif isinstance(o, rsa.PublicKey):
       return "PublicKey(" + str(o.n) + ', ' + str(o.e) + ')'
     elif isinstance(o, rsa.PrivateKey):
-      return "__private key object"
+      return "PrivateKey(" + str(o.n) + ', ' + str(o.e) + ')'
     elif isinstance(o, bytes):
       return "__signature bytes object"
     return super().default(o)
@@ -50,6 +51,10 @@ class Block():
     self.header_hash = Blockchain.calculateHash(prev_hash + str(height) + str(miner_id) + self.timestamp.strftime("%d|%m|%Y><%H:%M:%S") + str(difficulty) + str(self.nonce))
     self.transactions:list[Transaction] = list(transactions)
     
+  def calcBlockHash(self) -> str:
+    self.header_hash = Blockchain.calculateHash(self.previous_hash + str(self.height) + str(self.miner_id) + self.timestamp.strftime("%d|%m|%Y><%H:%M:%S") + str(self.
+    difficulty) + str(self.nonce))
+    return self.header_hash
   def __str__(self) -> str:
     return json.dumps(self.__dict__, cls=customEncoder, indent=4, separators=(',', ': '))
 
@@ -88,13 +93,16 @@ class User():
     r2 = hmac.new(key, bytes(t), hashlib.sha256).digest()
     return r2 == response
 
+  def __str__(self) -> str:
+    return json.dumps(self.__dict__, cls=customEncoder, indent=4, separators=(',', ': '))
+
 class Blockchain():
-  def __init__(self) -> None:
+  def __init__(self, first_user: User) -> None:
     # pool of all active nodes
     self.difficulty = 1
-    self.parent_user = User(10000, 0)
+    self.parent_user = first_user
     self.current_active_users: dict[int, User] = dict()
-    self.current_active_users[0] = self.parent_user
+    self.current_active_users[first_user.id] = self.parent_user
     # header_hash => block
     self.blockchain: dict[str, Block] = dict()
     genesis_block = Blockchain.createBlock(self.calculateHash(''), 0, [], 0, 0)
@@ -120,12 +128,21 @@ class Blockchain():
   def getSentRequestStatus(self, request_to_id: int) -> None:
     if self.parent_user.id in self.current_active_users[request_to_id].requests_received:
       print("Request has been delivered, pending approval by the other party")
+      return
     else:
       for txn in self.unmined_transactions:
         if txn.to_id == self.parent_user.id and txn.from_id == request_to_id:
           print("Request has been approved, wait for mining and validation")
           return
     print("No such request is pending, it may have already been executed.\nNew request can be sent")
+
+  @staticmethod
+  def count0start(s: str) -> int:
+    ans = 0
+    for i in s:
+      if i != "0": return ans
+      ans += 1
+    return ans
 
   def mineBlock(self) -> None:
     print("Mining started\n")
@@ -142,17 +159,10 @@ class Blockchain():
     print("Valid transactions separated:", block_txn)
     new_block = Block(self.newest_block, len(self.blockchain), block_txn, self.parent_user.id, self.difficulty)
 
-    def count0start(s: str) -> int:
-      ans = 0
-      for i in s:
-        if i != "0": return ans
-        ans += 1
-      return ans
-
-    while count0start(self.calculateHash(new_block)) < self.difficulty:
+    while Blockchain.count0start(new_block.calcBlockHash()) < self.difficulty:
       new_block.nonce += 1
 
-    if not self.validateBlock(new_block):
+    if not self.verifyBlock(new_block):
       print("Block failed verification for 50% validators, applying penalty to the miner")
       self.parent_user.amount -= 1
     else:    
@@ -174,7 +184,7 @@ class Blockchain():
   def verifyTransaction(self, transaction:Transaction) -> bool:
     if User.verifySig(transaction.transaction_id, transaction.sender_sign, self.current_active_users[transaction.from_id].public_key):
       print("Sender's signature verified")
-      if transaction.amount >= self.current_active_users[transaction.from_id].amount:
+      if transaction.amount <= self.current_active_users[transaction.from_id].amount:
         print('Sender\'s funds verified')
         return True
       else:
@@ -182,7 +192,7 @@ class Blockchain():
         print("User id:", transaction.from_id, " does not have enough funds")
     return False
   
-  def validateBlock(self, block: Block) -> bool:
+  def verifyBlock(self, block: Block) -> bool:
     # check the previous hash and the block height
     if not (block.previous_hash in self.blockchain) or not (self.blockchain[block.previous_hash].height==block.height-1):
       print("Block previous hash is invalid")
@@ -191,14 +201,17 @@ class Blockchain():
     print('previous hash verified')
     # check the headerhash
     header_hash=self.calculateHash(block.previous_hash + str(block.height) + str(block.miner_id) + block.timestamp.strftime("%d|%m|%Y><%H:%M:%S") + str(block.difficulty) + str(block.nonce))
+    
     if not header_hash==block.header_hash:
+      print("Block Header Hash incorrect")
       return False
+    print("Block Header hash verified")
 
-    if(header_hash[:self.difficulty] != "0"*block.difficulty):
+    if Blockchain.count0start(block.header_hash) < self.difficulty:
       print("PoW conditions not met")
       return False
 
-    print('header hash and PoW verified')
+    print('PoW verified')
     print('block verified')
     # block verified
     return True
@@ -217,15 +230,23 @@ class Blockchain():
     if request_from_id in self.parent_user.requests_received:
       # challenge from sending user
       challenge = User.generateChallengeH()
+      print("User", request_from_id, "- Challenge Generated and sent")
+      time.sleep(1)
       # random bit
       bit = os.urandom(1)
+      print("User", self.parent_user.id, "- Random Bit Added to Challenge")
+      time.sleep(1)
       # response creation by sender
       resp = self.current_active_users[request_from_id].createResponseH(self.parent_user.id, challenge, bit)
+      print("User", request_from_id, "- Response created using HMAC")
+      time.sleep(1)
       # verify using key
       User.verifyResponseH(self.parent_user.requests_received[request_from_id][1], challenge, bit, resp)
+      print("User", self.parent_user.id, "- Response Verified")
       print("User verified through Challenge-Response Authentication")
       self.current_active_users[request_from_id].requests_sent.pop(self.parent_user.id)
       self.send_crypto(request_from_id, self.parent_user.requests_received.pop(request_from_id)[0])
+      print("Request Accepted")
     else:
       print("No such pending request")
   
@@ -233,14 +254,18 @@ class Blockchain():
     if request_from_id in self.parent_user.requests_received:
       self.parent_user.requests_received.pop(request_from_id)
       self.current_active_users[request_from_id].requests_sent.pop(self.parent_user.id)
+      print("Request Rejected")
     else:
       print("No such pending request")
   
   def sendRequest(self, request_to_id: int, amount: int) -> None:
-    if request_to_id not in self.parent_user.requests_sent:
+    if request_to_id == self.parent_user.id:
+      print("Can't send a request to oneself")
+    elif request_to_id not in self.parent_user.requests_sent:
       self.parent_user.requests_sent[request_to_id] = (amount, self.parent_user.hkey)
       self.current_active_users[request_to_id].requests_received[self.parent_user.id] = (amount, self.parent_user.hkey)
       self.parent_user.hkey = os.urandom(16)
+      print("Request Sent")
     else:
       print("New request can be sent to a user only if the previous request has been responded to")
 
@@ -248,6 +273,7 @@ class Blockchain():
     if request_to_id in self.parent_user.requests_sent:
       self.parent_user.requests_sent.pop(request_to_id)
       self.current_active_users[request_to_id].requests_received.pop(self.parent_user.id)
+      print("Request Deleted")
     else:
       print("No such pending request")
 
@@ -265,6 +291,7 @@ class Blockchain():
     print("###  Printing Blocks in the Blockchain  ###")
     cur_block = self.blockchain[self.newest_block]
     while cur_block.height != 0:
+      print("-"*100)
       print(cur_block)
       cur_block = self.blockchain[cur_block.previous_hash]
     # print genesis block
