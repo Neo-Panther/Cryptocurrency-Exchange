@@ -230,7 +230,7 @@ class Blockchain():
     if request_from_id in self.parent_user.requests_received:
       # challenge from sending user
       challenge = User.generateChallengeH()
-      print("User", request_from_id, "- Challenge Generated and sent")
+      print("Blockchain System - Challenge Generated and sent")
       time.sleep(1)
       # random bit
       bit = os.urandom(1)
